@@ -5370,6 +5370,7 @@ public:
     void extract(const zip_info &member, const std::string &path)
     {
         std::fstream stream(detail::join_path({path, member.filename}), std::ios::binary | std::ios::out);
+        assert(stream.is_open());
         stream << open(member).rdbuf();
     }
 

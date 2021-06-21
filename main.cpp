@@ -1,8 +1,10 @@
-﻿#include "3rdparty/args.hxx"
+﻿#include <filesystem> // c++17 필요
+
+#include "3rdparty/args.hxx"
 #define CPPHTTPLIB_OPENSSL_SUPPORT // https 사용
 #include "3rdparty/httplib.h"
 #include "3rdparty/zip_file.hpp"
-#include <filesystem> // c++17 필요
+#include "3rdparty/json_struct.h"
 
 using namespace args;
 using namespace std;
@@ -52,6 +54,9 @@ enum class AppResult : int
 
     PARAMETER_ERROR = 1,
     FILESYSTEM_ERROR = 2,
+    REQUEST_ERROR = 3,
+
+    VERSION_JOSN_ERROR = 11,
 };
 
 size_t GetPathSepIndex(const string& url)
@@ -64,11 +69,6 @@ size_t GetPathSepIndex(const string& url)
         if (sep == 3) return i;
     }
     return i;
-}
-
-void StreamOut(const httplib::Result& result, ostream& out)
-{
-    out.write(result->body.c_str(), sizeof(char) * result->body.size());
 }
 
 string Replace(const string& src, const string& from, const string& to)
@@ -143,12 +143,12 @@ bool Request(const std::string& url, ostream& out, map<string, string> cookies =
     }
 
     // debug output(header)
-    cerr << "STATUS(" << res->status << ") " << url << endl;
-    cout << "  headers " << endl;
-    for (auto i = res->headers.cbegin(); i != res->headers.cend(); ++i)
-    {
-        cout << "    " << i->first << " = " << i->second << endl;
-    }
+    //cout << "STATUS(" << res->status << ") " << url << endl;
+    //cout << "  headers " << endl;
+    //for (auto i = res->headers.cbegin(); i != res->headers.cend(); ++i)
+    //{
+    //    cout << "    " << i->first << " = " << i->second << endl;
+    //}
     //cout << "body = " << res->body << endl << endl;
 
     // result handling
@@ -172,7 +172,7 @@ bool Request(const std::string& url, ostream& out, map<string, string> cookies =
             }
         }
 
-        StreamOut(res, out);
+        out.write(res->body.c_str(), sizeof(char) * res->body.size());
         return true;
     }
 
@@ -191,24 +191,38 @@ bool Request(const std::string& url, ostream& out, map<string, string> cookies =
     return false;
 }
 
-bool IsSameFile(const string& fileA, const string& fileB)
-{ // https://stackoverflow.com/questions/6163611/compare-two-files/37575457
-    ifstream f1(fileA, ifstream::binary | ifstream::ate);
-    ifstream f2(fileB, ifstream::binary | ifstream::ate);
-    if (f1.fail() || f2.fail()) return false; // file problem
-    if (f1.tellg() != f2.tellg()) return false; // size mismatch
-
-    // seek back to beginning and use std::equal to compare contents
-    f1.seekg(0, std::ifstream::beg);
-    f2.seekg(0, std::ifstream::beg);
-    return std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
-        std::istreambuf_iterator<char>(),
-        std::istreambuf_iterator<char>(f2.rdbuf()));
+bool Download(const string& url, const string& filePath)
+{
+    ofstream file(filePath, ofstream::binary);
+    if (file.fail())
+    {
+        cerr << "could not write a file : " << filePath << endl;
+        return false;
+    }
+    return Request(url, file);
 }
 
-bool ExtractZip(const filesystem::path& src, const filesystem::path& dest, bool slicent)
+std::string ReadTextFrom(const string& filePath)
+{
+    if (filesystem::exists(filePath) == false)
+    {
+        cerr << "file not found to read. " << filePath << endl;
+        return "";
+    }
+    ifstream file(filePath, ifstream::binary);
+    if (file.is_open() == false)
+    {
+        cerr << "file could not be opened. " << filePath << endl;
+        return "";
+    }
+    return string(istreambuf_iterator<char>(file), istreambuf_iterator<char>());
+}
+
+bool ExtractZip(const filesystem::path& src, filesystem::path dest, bool slicent)
 {
     if (!slicent) cout << "reading " << src.u8string() << endl;
+
+    if (dest.empty()) dest = "."; // current directory
 
     try
     {
@@ -217,17 +231,15 @@ bool ExtractZip(const filesystem::path& src, const filesystem::path& dest, bool 
         for (const auto& f : zip.infolist())
         {
             if (!slicent) cout << "extracting " << f.filename << " ... ";
-            const auto& path = filesystem::path(f.filename);
-
             if (f.filename.back() == '/') // directory
             {
-                const auto& dir = dest / f.filename;
-                if (filesystem::exists(dir))
+                const auto& target = dest / f.filename;
+                if (filesystem::exists(target))
                 {
                     if (!slicent) cout << "exists" << endl;
                     continue;
                 }
-                filesystem::create_directories(dir); // 모든 상위 directory 를 생성하지 못하는 경우,
+                filesystem::create_directories(target); // 모든 상위 directory 를 생성하지 못하는 경우,
                                                      // 실제 directory 를 올바르게 생성했다 하더라도 false 를 return 할 수 있음.
                 if (!slicent) cout << "created" << endl;
                 continue;
@@ -261,8 +273,44 @@ string ReadFirstLine(const string& filePath)
     return line;
 }
 
+struct VersionJson
+{
+    string Version;
+    string ZipFileUrl;
+    string ExecutePath;
+
+    JS_OBJ(Version, ZipFileUrl, ExecutePath);
+
+    bool LoadFrom(const string& json)
+    {
+        JS::ParseContext context(json);
+        if (context.parseTo(*this) == JS::Error::NoError) return true;
+
+        cerr << "verison file json error(" << static_cast<int>(context.error) << ")" << endl;
+        cerr << "    " << context.makeErrorString() << endl; // detail error display
+        return false;
+    }
+};
+
+bool Execute(const string& versionFilePath)
+{
+    VersionJson version;
+    const auto& json = ReadTextFrom(versionFilePath);
+    if (json.empty()) return false;
+    if (version.LoadFrom(json) == false) return false;
+
+    stringstream command;
+    command << "start " << version.ExecutePath;
+    system(command.str().c_str());
+    return true;
+}
+
 int main(int argc, const char** argv)
 {
+    const auto& VERSION_FILE_NAME = string(u8"version.json");
+    const auto& VERSION_TMP_FILE_NAME = string(VERSION_FILE_NAME + u8".tmp");
+    const auto& ZIP_FILE_NAME = string(u8"package.zip");
+
     Arguments args(argc, argv);
 
     if (argc < 2)
@@ -271,9 +319,55 @@ int main(int argc, const char** argv)
         return static_cast<int>(AppResult::PARAMETER_ERROR);
     }
 
-    ofstream test("test.zip", ofstream::binary);
-    Request("https://drive.google.com/uc?export=download&id=1FiOh_Md6trjNC1qigOZhLmQDc7Wv1HxQ", test);
+    const auto& versionUrl = args.versionUrl.Get();
+    cout << "checking version .. " << versionUrl << endl;
+    if (Download(versionUrl, VERSION_TMP_FILE_NAME) == false)
+    {
+        return static_cast<int>(AppResult::REQUEST_ERROR);
+    }
 
+    VersionJson newVersion;
+    const auto& newVersionJson = ReadTextFrom(VERSION_TMP_FILE_NAME);
+    if (newVersionJson.empty()) return static_cast<int>(AppResult::VERSION_JOSN_ERROR);
+    if (newVersion.LoadFrom(newVersionJson) == false) return static_cast<int>(AppResult::VERSION_JOSN_ERROR);
 
+    VersionJson oldVersion;
+    if (filesystem::exists(VERSION_FILE_NAME))
+    {
+        const auto& oldVersionJson = ReadTextFrom(VERSION_FILE_NAME);
+        oldVersion.LoadFrom(oldVersionJson);
+    }
+    else
+    {
+        cout << "no previous version file. is it first time?" << endl;
+    }
+
+    if (newVersion.Version == oldVersion.Version)
+    { // no patch needed
+        cout << "this version is up-to-date, running " << newVersion.ExecutePath << endl;
+        system((string(u8"start ") + newVersion.ExecutePath).c_str()); // run process
+        return static_cast<int>(AppResult::OK);
+    }
+
+    // download package
+    cout << "here comes new version... downloading " << newVersion.ZipFileUrl << endl;
+    if (Download(newVersion.ZipFileUrl, ZIP_FILE_NAME) == false)
+    {
+        return static_cast<int>(AppResult::REQUEST_ERROR);
+    }
+
+    // patch
+    cout << "unpacking.." << endl;
+    if (ExtractZipToSourceDir(ZIP_FILE_NAME) == false)
+    {
+        return static_cast<int>(AppResult::FILESYSTEM_ERROR);
+    }
+
+    // update local version file
+    filesystem::remove(VERSION_FILE_NAME);
+    filesystem::rename(VERSION_TMP_FILE_NAME, VERSION_FILE_NAME);
+
+    // run
+    system((string(u8"start ") + newVersion.ExecutePath).c_str()); // run process
     return static_cast<int>(AppResult::OK);
 }
