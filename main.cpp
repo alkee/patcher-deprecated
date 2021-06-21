@@ -48,6 +48,28 @@ public:
     const ArgumentParser& GetParser() { return parser; }
 };
 
+template<class T>
+bool LoadFrom(T& dest, const string& json)
+{
+    JS::ParseContext context(json);
+    if (context.parseTo(dest) == JS::Error::NoError) return true;
+
+    cerr << "verison file json error(" << static_cast<int>(context.error) << ")" << endl;
+    cerr << "    " << context.makeErrorString() << endl; // detail error display
+    return false;
+}
+
+struct AppConfig
+{
+    string VersionUrl;
+    JS_OBJ(VersionUrl);
+
+    bool Load(const string& configJson)
+    {
+        return LoadFrom(*this, configJson);
+    }
+};
+
 enum class AppResult : int
 {
     OK = 0,
@@ -273,7 +295,7 @@ string ReadFirstLine(const string& filePath)
     return line;
 }
 
-struct VersionJson
+struct VersionInfo
 {
     string Version;
     string ZipFileUrl;
@@ -281,23 +303,18 @@ struct VersionJson
 
     JS_OBJ(Version, ZipFileUrl, ExecutePath);
 
-    bool LoadFrom(const string& json)
+    bool Load(const string& json)
     {
-        JS::ParseContext context(json);
-        if (context.parseTo(*this) == JS::Error::NoError) return true;
-
-        cerr << "verison file json error(" << static_cast<int>(context.error) << ")" << endl;
-        cerr << "    " << context.makeErrorString() << endl; // detail error display
-        return false;
+        return LoadFrom(*this, json);
     }
 };
 
 bool Execute(const string& versionFilePath)
 {
-    VersionJson version;
+    VersionInfo version;
     const auto& json = ReadTextFrom(versionFilePath);
     if (json.empty()) return false;
-    if (version.LoadFrom(json) == false) return false;
+    if (version.Load(json) == false) return false;
 
     stringstream command;
     command << "start " << version.ExecutePath;
@@ -313,29 +330,41 @@ int main(int argc, const char** argv)
 
     Arguments args(argc, argv);
 
-    if (argc < 2)
+    const auto& appPath = filesystem::path(args.GetParser().Prog());
+    auto appFileName = appPath.filename();
+    auto appConfigName = appFileName.replace_extension(u8"config");
+
+    // config load
+    AppConfig appConfig;
+    bool configExists = filesystem::exists(appConfigName);
+    if (configExists) appConfig.Load(ReadTextFrom(appConfigName.u8string()));
+
+    if (argc < 2 && configExists == false)
     {
-        cout << args.GetParser();
+        cout << args.GetParser() << endl;
         return static_cast<int>(AppResult::PARAMETER_ERROR);
     }
 
-    const auto& versionUrl = args.versionUrl.Get();
+    const auto& versionUrl = args.versionUrl.Matched()
+        ? args.versionUrl.Get() // override config
+        : appConfig.VersionUrl;
+
     cout << "checking version .. " << versionUrl << endl;
     if (Download(versionUrl, VERSION_TMP_FILE_NAME) == false)
     {
         return static_cast<int>(AppResult::REQUEST_ERROR);
     }
 
-    VersionJson newVersion;
+    VersionInfo newVersion;
     const auto& newVersionJson = ReadTextFrom(VERSION_TMP_FILE_NAME);
     if (newVersionJson.empty()) return static_cast<int>(AppResult::VERSION_JOSN_ERROR);
-    if (newVersion.LoadFrom(newVersionJson) == false) return static_cast<int>(AppResult::VERSION_JOSN_ERROR);
+    if (newVersion.Load(newVersionJson) == false) return static_cast<int>(AppResult::VERSION_JOSN_ERROR);
 
-    VersionJson oldVersion;
+    VersionInfo oldVersion;
     if (filesystem::exists(VERSION_FILE_NAME))
     {
         const auto& oldVersionJson = ReadTextFrom(VERSION_FILE_NAME);
-        oldVersion.LoadFrom(oldVersionJson);
+        oldVersion.Load(oldVersionJson);
     }
     else
     {
