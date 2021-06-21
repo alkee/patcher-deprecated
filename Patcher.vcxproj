@@ -149,6 +149,7 @@
   <ItemGroup>
     <ClInclude Include="3rdparty\args.hxx" />
     <ClInclude Include="3rdparty\httplib.h" />
+    <ClInclude Include="3rdparty\json_struct.h" />
     <ClInclude Include="3rdparty\zip_file.hpp" />
   </ItemGroup>
   <ItemGroup>
